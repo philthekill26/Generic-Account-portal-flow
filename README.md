@@ -3,6 +3,11 @@
 Reusable seller demo with neutral branding, customer login, subscription management,
 profile/payment/order sample tabs, a cancellation survey, and a separate admin login.
 
+## Version 2.1
+
+Adds Uncancel subscription for scheduled cancellations and an admin viewer of actual
+submission requests/responses. See [upgrade steps](docs/UPGRADE-2.1.md).
+
 ## Start locally
 
 Install Node.js 22.13 or later (Node 24 recommended), extract this folder, then run:

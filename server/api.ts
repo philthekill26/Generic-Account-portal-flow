@@ -18,6 +18,24 @@ async function wrap(fn:()=>Promise<Response>){try{return await fn();}catch(e){re
 async function fs(path:string,method='GET',body?:unknown){let r:Response;try{r=await fetch('https://api.fastspring.com'+path,{method,headers:{Authorization:'Basic '+Buffer.from(env.FS_API_USERNAME+':'+env.FS_API_PASSWORD).toString('base64'),'Content-Type':'application/json',Accept:'application/json'},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(15000),redirect:'error'});}catch{throw new Failure('FastSpring could not be reached. The outcome may be unknown; refresh before retrying.',502);}
 if(!r.ok)throw new Failure(`FastSpring returned HTTP ${r.status}.${r.status===429?' Please retry after '+(r.headers.get('retry-after')||'a short wait')+' seconds.':''}`,502);
 const data=await r.json();if(data.error||data.errors)throw new Failure('FastSpring reported an API error. Review the test subscription in FastSpring.',502);return data;}
+// Mutation-only audit: records exact JSON bodies, never credentials or headers.
+async function mutation(operation:string,sub:string,path:string,method:string,body:any,simulated:any){
+ const id=randomBytes(16).toString('hex');
+ q('INSERT INTO portal_api_activity(id,subscription,operation,method,path,request,outcome,created,source) VALUES(?,?,?,?,?,?,?,?,?)',id,sub,operation,method,path,body===undefined?null:JSON.stringify(body),'pending',new Date().toISOString(),mode).run();
+ try{
+  let data:any,status=200;
+  if(test){
+   const r=await fetch('https://api.fastspring.com'+path,{method,headers:{Authorization:'Basic '+Buffer.from(env.FS_API_USERNAME+':'+env.FS_API_PASSWORD).toString('base64'),'Content-Type':'application/json',Accept:'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000),redirect:'error'});
+   status=r.status;
+   // Only API response JSON is recorded. Non-JSON error pages are not exposed.
+   try{data=await r.json();}catch{data={error:'Non-JSON API response'};}
+   q('UPDATE portal_api_activity SET response=?,status=?,outcome=? WHERE id=?',JSON.stringify(data),status,r.ok?'received':'failed',id).run();
+   if(!r.ok)throw new Failure('FastSpring returned HTTP '+status+'. Refresh before retrying.',502);
+  }else {data=simulated;q("UPDATE portal_api_activity SET response=?,status=200,outcome='received' WHERE id=?",JSON.stringify(data),id).run();}
+  if(data.error||data.errors)throw new Failure('FastSpring reported an API error.',502);
+  return data;
+ }catch(e){q("UPDATE portal_api_activity SET outcome=CASE WHEN status IS NULL THEN 'unknown' ELSE 'failed' END WHERE id=?",id).run();throw e instanceof Failure?e:new Failure('FastSpring could not be reached. Refresh and review the outcome before retrying.',502);}
+}
 const subscriptionId=()=>env.FS_SUBSCRIPTION_ID!;
 async function subscription(s:any){if(!test)return {id:'demo-subscription',display:env.PRODUCT_NAME||'Pro membership',state:s.state,active:s.state!=='deactivated',autoRenew:s.state==='active',priceDisplay:'£19.00 / month',nextChargeDate:'2026-10-17',live:false};const data=await fs('/subscriptions/'+encodeURIComponent(subscriptionId())+'?scope=test');const sub=data.subscriptions?.[0]||data;
 if(sub.live!==false || sub.account!==env.FS_ACCOUNT_ID || (sub.id||sub.subscription)!==subscriptionId())throw new Failure('Subscription verification failed: test mode, account ownership, or ID did not match.',409);return {id:sub.id||sub.subscription,display:sub.display||sub.product,state:sub.state,active:sub.active,autoRenew:sub.autoRenew,priceDisplay:sub.priceDisplay||'',nextChargeDate:sub.nextChargeDate||null,live:sub.live};}
@@ -25,8 +43,8 @@ const sampleReasons=['Too expensive','No longer needed','Difficult to use','Supp
 async function survey(){return test?fs('/subscriptions/cancelSurvey/reasons/'+encodeURIComponent(subscriptionId())+'?lang=en'):{language:'en',reasons:sampleReasons};}
 const stopped=(sub:any)=>['canceled','deactivated'].includes(sub.state)||sub.autoRenew===false;
 export async function META(){return json({brand:env.BRAND_NAME||'YourBrand',mode,credentials:test?null:{customer:credentials.customer,admin:credentials.admin}});}
-export async function GET(req:Request){return wrap(async()=>{const s=session(req);if(s.role==='admin')return json({role:'admin'});const sub=await subscription(s);const surveyData=stopped(sub)?null:await survey();return json({role:'customer',subscription:sub,reasons:surveyData?.reasons?.filter((r:any)=>r.enabled!==false)||[],language:surveyData?.language||'en'});});}
-export async function ADMIN(req:Request){return wrap(async()=>{session(req,'admin');if(req.method!=='GET')throw new Failure('Read only.',405);const rows=q('SELECT id,subscription,reason_id,reason_name,comment,language,period,created,status,error,source FROM portal_surveys ORDER BY created DESC LIMIT 200').all().results;let remote=null,remoteError=null;if(test){try{await subscription({});remote=await survey();}catch(e){remoteError=(e as Error).message;}}return json({rows,remote,remoteError,mode});});}
+export async function GET(req:Request){return wrap(async()=>{const s=session(req);if(s.role==='admin')return json({role:'admin'});const sub=await subscription(s);if(test&&sub.state==='active'&&sub.autoRenew===true)q("UPDATE portal_api_activity SET outcome='reconciled' WHERE subscription=? AND source='test' AND operation='uncancel' AND outcome IN ('pending','unknown')",sub.id).run();const surveyData=stopped(sub)?null:await survey();return json({role:'customer',subscription:sub,canUncancel:sub.state==='canceled'&&sub.active===true,reasons:surveyData?.reasons?.filter((r:any)=>r.enabled!==false)||[],language:surveyData?.language||'en'});});}
+export async function ADMIN(req:Request){return wrap(async()=>{session(req,'admin');if(req.method!=='GET')throw new Failure('Read only.',405);const rows=q('SELECT id,subscription,reason_id,reason_name,comment,language,period,created,status,error,source FROM portal_surveys ORDER BY created DESC LIMIT 200').all().results;let remote=null,remoteError=null;if(test){try{await subscription({});const result=await survey();remote=result.cancelSurvey?{subscription:result.subscription,cancelSurvey:result.cancelSurvey,language:result.language}:null;}catch(e){remoteError=(e as Error).message;}}const activity=q('SELECT * FROM portal_api_activity ORDER BY created DESC LIMIT 100').all().results.map((r:any)=>({...r,request:r.request?JSON.parse(r.request):null,response:r.response?JSON.parse(r.response):null}));return json({rows,remote,remoteError,mode,activity});});}
 export async function POST(req:Request){return wrap(async()=>{csrf(req);let body:any;try{body=await req.json();}catch{throw new Failure('Invalid JSON.');}
 if(body.action==='login'){
 const role=body.role==='admin'?'admin':'customer';const key=role;const now=Date.now();q('DELETE FROM portal_limits WHERE reset_at<?',now).run();const limiter=q('SELECT * FROM portal_limits WHERE key=?',key).first() as any;if(limiter?.attempts>=20)throw new Failure('Too many attempts. Try again in 15 minutes.',429);
@@ -35,6 +53,22 @@ if(typeof body.username!=='string'||typeof body.password!=='string'||!safeEqual(
 q('DELETE FROM portal_limits WHERE key=?',key).run();const token=randomBytes(32).toString('hex');q('DELETE FROM portal_sessions WHERE expires<?',now).run();q('INSERT INTO portal_sessions(token_hash,role,expires,fingerprint) VALUES(?,?,?,?)',hash(token),role,now+3600000,fingerprint).run();const secure=new URL(req.url).protocol==='https:';return json({role},200,{'Set-Cookie':`portal_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600${secure?'; Secure':''}`});}
 const s=session(req);if(body.action==='logout'){q('DELETE FROM portal_sessions WHERE token_hash=?',s.token_hash).run();return json({ok:true},200,{'Set-Cookie':'portal_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'});}
 if(s.role!=='customer')throw new Failure('Customer access required.',403);
+if(body.action==='uncancel'){
+ if(body.confirm!==true)throw new Failure('Confirm that you want to restore renewal.');
+ const key=test?subscriptionId():s.token_hash;
+ try{q('INSERT INTO portal_locks(subscription,acquired) VALUES(?,?)',key,Date.now()).run();}catch{throw new Failure('A subscription change is already in progress or needs review.',409);}
+ try{
+  const sub=await subscription(s);
+  if(sub.state==='active'&&sub.autoRenew===true)return json({ok:true,alreadyActive:true});
+  if(sub.state!=='canceled'||sub.active!==true)throw new Failure('Only a scheduled cancellation can be undone. This subscription is not eligible for uncancel.',409);
+  if(test&&q("SELECT id FROM portal_api_activity WHERE subscription=? AND source='test' AND operation='uncancel' AND outcome IN ('pending','unknown') LIMIT 1",sub.id).first())throw new Failure('A previous uncancel request needs review in FastSpring before retrying.',409);
+  const result=await mutation('uncancel',sub.id,'/subscriptions','POST',{subscriptions:[{subscription:sub.id,deactivation:null}]},{subscriptions:[{subscription:sub.id,action:'subscription.update',result:'success'}]});
+  if(result.subscriptions?.find((x:any)=>x.subscription===sub.id)?.result!=='success')throw new Failure('FastSpring did not confirm uncancel success. Refresh and review the subscription.',502);
+  if(!test)q("UPDATE portal_sessions SET state='active',period=NULL WHERE token_hash=?",s.token_hash).run();
+  q("UPDATE portal_surveys SET status='complete',error=NULL WHERE subscription=? AND source=? AND status='cancel_requested'",sub.id,mode).run();
+  return json({ok:true});
+ }finally{q('DELETE FROM portal_locks WHERE subscription=?',key).run();}
+}
 if(body.action==='reset'){if(test)throw new Failure('Create a fresh test subscription in FastSpring to repeat this demo.',409);q("UPDATE portal_sessions SET state='active',period=NULL WHERE token_hash=?",s.token_hash).run();return json({ok:true});}
 if(body.action!=='cancel')throw new Failure('Unknown action.');
 if(![0,1].includes(body.billingPeriod)||typeof body.reasonId!=='string'||typeof body.feedbackText!=='string'||body.feedbackText.length>2000||body.confirm!==true)throw new Failure('Select a reason, cancellation timing, and confirm. Feedback is limited to 2,000 characters.');
@@ -50,10 +84,10 @@ attempt=q("SELECT * FROM portal_surveys WHERE token_hash=? AND subscription=? AN
 if(attempt?.status==='cancel_requested')throw new Failure('The previous cancellation outcome needs review in FastSpring before another attempt.',409);
 const surveyID=attempt?.id||randomBytes(16).toString('hex');const payload={subscription:sub.id,cancelSurvey:{reasonId:reason.id,feedbackText:body.feedbackText,lang:data.language||'en'}};
 q('INSERT INTO portal_surveys(id,token_hash,subscription,reason_id,reason_name,comment,language,period,created,status,source) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET reason_id=excluded.reason_id,reason_name=excluded.reason_name,comment=excluded.comment,period=excluded.period,status=excluded.status,error=NULL',surveyID,s.token_hash,sub.id,reason.id,reason.displayName,body.feedbackText,data.language||'en',body.billingPeriod,new Date().toISOString(),'saving_survey',mode).run();attempt={id:surveyID};
-if(test){const saved=await fs('/subscriptions/cancelSurvey/response','POST',payload);if(saved.reasonId!==reason.id)throw new Failure('FastSpring did not confirm the selected survey reason. Cancellation was not sent.',502);}
+{const saved=await mutation('survey',sub.id,'/subscriptions/cancelSurvey/response','POST',payload,{reasonId:reason.id,feedbackText:body.feedbackText,lang:data.language||'en'});if(saved.reasonId!==reason.id)throw new Failure('FastSpring did not confirm the selected survey reason. Cancellation was not sent.',502);}
 q("UPDATE portal_surveys SET status='survey_saved' WHERE id=?",surveyID).run();
-if(test){q("UPDATE portal_surveys SET status='cancel_requested' WHERE id=?",surveyID).run();const result=await fs('/subscriptions/'+encodeURIComponent(sub.id)+'?billingPeriod='+body.billingPeriod,'DELETE');const entry=result.subscriptions?.find((x:any)=>x.subscription===sub.id);if(entry?.result!=='success')throw new Failure('FastSpring did not confirm cancellation success. Review the subscription before retrying.',502);}
-else q('UPDATE portal_sessions SET state=?,period=? WHERE token_hash=?',body.billingPeriod===0?'deactivated':'canceled',body.billingPeriod,s.token_hash).run();
+if(test){q("UPDATE portal_surveys SET status='cancel_requested' WHERE id=?",surveyID).run();const result=await mutation('cancel',sub.id,'/subscriptions/'+encodeURIComponent(sub.id)+'?billingPeriod='+body.billingPeriod,'DELETE',undefined,null);const entry=result.subscriptions?.find((x:any)=>x.subscription===sub.id);if(entry?.result!=='success')throw new Failure('FastSpring did not confirm cancellation success. Review the subscription before retrying.',502);}
+else {await mutation('cancel',sub.id,'/subscriptions/'+encodeURIComponent(sub.id)+'?billingPeriod='+body.billingPeriod,'DELETE',undefined,{subscriptions:[{subscription:sub.id,action:'subscription.cancel',result:'success'}]});q('UPDATE portal_sessions SET state=?,period=? WHERE token_hash=?',body.billingPeriod===0?'deactivated':'canceled',body.billingPeriod,s.token_hash).run();}
 q("UPDATE portal_surveys SET status='complete' WHERE id=?",surveyID).run();return json({ok:true,billingPeriod:body.billingPeriod});
 }catch(e){if(attempt)q('UPDATE portal_surveys SET error=? WHERE id=?',(e as Error).message,attempt.id).run();throw e;}finally{q('DELETE FROM portal_locks WHERE subscription=?',id).run();}
 });}

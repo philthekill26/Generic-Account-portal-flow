@@ -2,7 +2,7 @@
 
 - Frontend and backend production builds passed using Node 24.19.0 and installed dependencies.
 - TypeScript checks passed, including server/api.ts.
-- Nine HTTP integration tests passed: session/role checks, cross-origin rejection, both
+- Fifteen HTTP integration tests passed: session/role checks, cross-origin rejection, both
   timings, SQLite restart persistence, API request order/body, live-subscription and wrong-owner
   rejection, survey failure/retry, unknown cancellation outcome, API body error and cross-session
   retry protection.
@@ -15,3 +15,6 @@
   rebuilding from source requires installing the declared dependencies.
 
 Run `npm test` to repeat the HTTP checks without installing dependencies (Node 22.13+).
+
+Version 2.1 additionally tests uncancel in simulation/test modes, deactivated rejection,
+uncancel failure/unknown outcomes, and selected-reason-only admin request bodies.

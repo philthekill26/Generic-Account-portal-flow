@@ -67,3 +67,24 @@ login throttling. The demo uses fixed operator-configured identities, not seller
 Schemas checked on 17 September 2026. Actual account testing still requires credentials
 and a disposable test subscription. Mock-based verification is not proof of an account's
 API permissions or the live service's availability.
+
+## Version 2.1: uncancel and request/response history
+
+A customer can remove a scheduled cancellation while the subscription is still active.
+The app verifies test mode/account ownership, asks for confirmation, then sends:
+
+```json
+{"subscriptions":[{"subscription":"SERVER_CONFIGURED_TEST_SUBSCRIPTION","deactivation":null}]}
+```
+
+Endpoint: POST /subscriptions. A matching success entry is required. Deactivated
+subscriptions are rejected; this button is not a repurchase/reactivation flow.
+Source: https://developer.fastspring.com/reference/update-a-subscription
+
+The admin mutation history now stores actual POST/DELETE JSON requests and responses,
+HTTP status, timestamp and operation. A survey submission still contains only one
+selected reasonId (cost is "1"), feedbackText and lang. The reason options GET response
+is not a submission and is no longer displayed in the admin payload viewer.
+Authentication headers are never logged. Simulation records are explicitly labelled.
+Earlier request/response bodies cannot be recovered; the activity log starts on upgrade.
+SQLite automatically adds the activity table without deleting existing surveys.
