@@ -1,7 +1,22 @@
-# Generic account portal — FastSpring test integration
+# FastSpring Self-Hosted Cancellation Survey Demo
 
 Reusable seller demo with neutral branding, customer login, subscription management,
 profile/payment/order sample tabs, a cancellation survey, and a separate admin login.
+
+## Version 2.4
+
+Names and explains the seller-hosted cancellation survey flow. See
+[deployment steps](docs/UPGRADE-2.4.md).
+
+## Version 2.3
+
+Full FastSpring demo branding. Set BRAND_NAME=FastSpring in Render to override an
+existing Generic label. See [upgrade steps](docs/UPGRADE-2.3.md).
+
+## Version 2.2
+
+Adds FastSpring branding, a pre-submit API request preview, and documentation links.
+See [upgrade steps](docs/UPGRADE-2.2.md).
 
 ## Version 2.1
 

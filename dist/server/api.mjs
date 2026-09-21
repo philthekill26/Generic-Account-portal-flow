@@ -178,7 +178,7 @@ async function survey() {
 var stopped = (sub) => ["canceled", "deactivated"].includes(sub.state) || sub.autoRenew === false;
 async function META() {
 	return json({
-		brand: env.BRAND_NAME || "YourBrand",
+		brand: env.BRAND_NAME || "FastSpring",
 		mode,
 		credentials: test ? null : {
 			customer: credentials.customer,

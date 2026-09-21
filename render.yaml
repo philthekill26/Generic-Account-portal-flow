@@ -11,7 +11,7 @@ services:
       - key: FS_MODE
         value: simulation
       - key: BRAND_NAME
-        value: YourBrand
+        value: FastSpring
       - key: HOST
         value: 0.0.0.0
       - key: TRUST_PROXY
